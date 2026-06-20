@@ -93,7 +93,7 @@ test/           hardware test + diagnostic scripts
 
 ## Requirements
 
-- A **QNAP TS-470 Pro** running **TrueNAS** (SCALE / Linux based).
+- A **QNAP TS-470 Pro** running **TrueNAS**.
 - **Python 3** (standard library only — no `pip install` needed).
 - **root** (direct access to `/dev/port`, `/dev/ttyS1`, and `/dev/input/*`).
 
@@ -189,7 +189,7 @@ WantedBy=multi-user.target
 sudo systemctl enable --now qnap-lcd.service
 ```
 
-> On TrueNAS SCALE you can alternatively register `main.py --quiet` as a
+> On TrueNAS you can alternatively register `main.py --quiet` as a
 > **Post-Init** command in the UI. Don't also launch it by hand — one instance
 > only.
 
