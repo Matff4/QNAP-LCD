@@ -200,27 +200,38 @@ class SysInfo:
   def pools(self):
     """List of dicts: {name, alloc, total, cap, health} in human-readable units.
 
-    ``total`` is usable pool capacity (allocated + free), not the sum of raw
-    drive sizes — so RAIDZ1 shows ~2.5T, not 4x1TB added together.
+    Uses ``zfs list`` on each pool root (``-d 0``) so ``total`` is *usable*
+    capacity (used + avail), matching the TrueNAS UI — not ``zpool list`` SIZE
+    which is raw vdev capacity (e.g. 3.62T for 4×1TB RAIDZ1 vs ~2.55T usable).
     """
     def produce():
       result = []
-      out = _run('zpool list -Hp -o name,allocated,free,capacity,health')
+      health = {}
+      for ln in _run('zpool list -H -o name,health').splitlines():
+        f = ln.split('\t') if '\t' in ln else ln.split()
+        if len(f) >= 2:
+          health[f[0]] = f[1]
+
+      out = _run('zfs list -Hp -o name,used,avail -d 0')
       for ln in out.splitlines():
         f = ln.split('\t') if '\t' in ln else ln.split()
-        if len(f) >= 5:
-          try:
-            alloc_b = int(f[1])
-            free_b = int(f[2])
-          except ValueError:
-            continue
-          result.append({
-            'name': f[0],
-            'alloc': _human_bytes(alloc_b),
-            'total': _human_bytes(alloc_b + free_b),
-            'cap': f'{f[3]}%',
-            'health': f[4],
-          })
+        if len(f) < 3:
+          continue
+        try:
+          used_b = int(f[1])
+          avail_b = int(f[2])
+        except ValueError:
+          continue
+        total_b = used_b + avail_b
+        cap = 0 if total_b == 0 else int(round(100 * used_b / total_b))
+        name = f[0]
+        result.append({
+          'name': name,
+          'alloc': _human_bytes(used_b),
+          'total': _human_bytes(total_b),
+          'cap': f'{cap}%',
+          'health': health.get(name, '?'),
+        })
       return result
     return self._cached('pools', self.slow_ttl, produce)
 
