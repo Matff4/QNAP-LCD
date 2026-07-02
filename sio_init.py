@@ -387,7 +387,12 @@ def read_fans(verbose=False):
             f'{rpm if count else 0} rpm')
       if count and count != 0xFFFF and 100 <= rpm <= 12000:
         rpms.append(rpm)
-    return rpms
+    if not rpms:
+      return []
+    # TS-470 Pro: unused tach channels often read ~366 RPM; the chassis fan is
+    # the highest plausible reading (typically fan1 / reg 0xB0).
+    plausible = [r for r in rpms if r >= 500]
+    return [max(plausible if plausible else rpms)]
   finally:
     p.close()
 

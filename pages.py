@@ -40,6 +40,22 @@ def _run(cmd, timeout=5):
     return ''
 
 
+def _human_bytes(size):
+  """Format a byte count like zpool list (base 1024, compact suffix)."""
+  if size < 1024:
+    return f'{size}B'
+  for shift, suffix in ((40, 'T'), (30, 'G'), (20, 'M'), (10, 'K')):
+    unit = 1 << shift
+    if size >= unit:
+      val = size / unit
+      if val >= 100:
+        return f'{val:.0f}{suffix}'
+      if val >= 10:
+        return f'{val:.1f}{suffix}'
+      return f'{val:.2f}{suffix}'
+  return f'{size}B'
+
+
 class SysInfo:
   """Collects system metrics. Slow sources (zpool/ip) are cached with a TTL."""
 
@@ -150,6 +166,9 @@ class SysInfo:
           rpms = sio_init.read_fans()
         except Exception:  # noqa: BLE001
           rpms = []
+      if len(rpms) > 1:
+        plausible = [r for r in rpms if r >= 500]
+        return [max(plausible if plausible else rpms)]
       return rpms
     return self._cached('fans', min(self.slow_ttl, 5.0), produce)
 
@@ -179,15 +198,29 @@ class SysInfo:
     return self._cached('ifaces', self.slow_ttl, produce)
 
   def pools(self):
-    """List of dicts: {name, size, alloc, cap, health}."""
+    """List of dicts: {name, alloc, total, cap, health} in human-readable units.
+
+    ``total`` is usable pool capacity (allocated + free), not the sum of raw
+    drive sizes — so RAIDZ1 shows ~2.5T, not 4x1TB added together.
+    """
     def produce():
       result = []
-      out = _run('zpool list -H -o name,size,alloc,cap,health')
+      out = _run('zpool list -Hp -o name,allocated,free,capacity,health')
       for ln in out.splitlines():
         f = ln.split('\t') if '\t' in ln else ln.split()
         if len(f) >= 5:
-          result.append({'name': f[0], 'size': f[1], 'alloc': f[2],
-                         'cap': f[3], 'health': f[4]})
+          try:
+            alloc_b = int(f[1])
+            free_b = int(f[2])
+          except ValueError:
+            continue
+          result.append({
+            'name': f[0],
+            'alloc': _human_bytes(alloc_b),
+            'total': _human_bytes(alloc_b + free_b),
+            'cap': f'{f[3]}%',
+            'health': f[4],
+          })
       return result
     return self._cached('pools', self.slow_ttl, produce)
 
@@ -202,7 +235,7 @@ class SysInfo:
 
 def _fmt_pool(p):
   cap = p['cap'].rstrip('%')
-  return (p['name'][:16], f"{p['alloc']}/{p['size']} {cap}%"[:16])
+  return (p['name'][:16], f"{p['alloc']}/{p['total']} {cap}%"[:16])
 
 
 def page_os_version(si, _arg):
@@ -226,9 +259,7 @@ def page_fan_speed(si, _arg):
   rpms = si.fan_rpms()
   if not rpms:
     return [('Fan Speed', 'N/A')]
-  if len(rpms) == 1:
-    return [('Fan Speed', f'{rpms[0]} RPM')]
-  return [('Fan Speed', ' '.join(str(r) for r in rpms)[:16])]
+  return [('Fan Speed', f'{max(rpms)} RPM')]
 
 
 def page_uptime(si, _arg):
