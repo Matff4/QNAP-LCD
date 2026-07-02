@@ -136,7 +136,12 @@ class Display:
     self._bl_timeout = None
     self._bl_timer = None
     self._bl_on = False
+    self._center = False
     self._lock = threading.Lock()
+
+  def set_center(self, on=True):
+    """When enabled, whole-line writes (line/show) are horizontally centered."""
+    self._center = bool(on)
 
   @property
   def ok(self):
@@ -156,10 +161,12 @@ class Display:
       self._flush_row(row)
 
   def line(self, row, text):
-    """Overwrite an entire row (blank-padded)."""
+    """Overwrite an entire row (blank-padded; centered if enabled)."""
     if not (0 <= row < self.rows):
       return
     text = str(text)[: self.cols]
+    if self._center:
+      text = text.center(self.cols)
     with self._lock:
       self._buf[row] = list(text.ljust(self.cols))
       self._flush_row(row)

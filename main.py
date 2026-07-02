@@ -39,8 +39,25 @@ import sio_init
 
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'menu.conf')
 
-BACKLIGHT_TIMEOUT = 120       # seconds before the LCD backlight turns off
-REFRESH_INTERVAL = 10         # seconds between page data refreshes
+# Defaults; any of these can be overridden in menu.conf as "KEY = VALUE".
+DEFAULT_BACKLIGHT_TIMEOUT = 120   # seconds before backlight turns off (0 = always on)
+DEFAULT_REFRESH_INTERVAL = 10     # seconds between page data refreshes
+DEFAULT_CENTER = False            # center page titles/values on the LCD
+DEFAULT_MANAGE_POWERKEY = True    # stop systemd-logind from powering off on press
+
+# Drop-in that tells systemd-logind to ignore the power button, so our
+# click -> prompt -> double-click flow handles shutdown instead of an instant
+# poweroff. A drop-in is idempotent and survives package upgrades better than
+# editing logind.conf directly.
+LOGIND_DROPIN_DIR = '/etc/systemd/logind.conf.d'
+LOGIND_DROPIN = os.path.join(LOGIND_DROPIN_DIR, '10-qnap-lcd.conf')
+LOGIND_DROPIN_CONTENT = (
+  '# Managed by qnap-lcd (main.py): let the LCD menu handle the power button.\n'
+  '[Login]\n'
+  'HandlePowerKey=ignore\n'
+  'HandlePowerKeyLongPress=ignore\n'
+)
+
 OVERLAY_SECONDS = 4.0         # how long a transient overlay stays up
 POWER_PROMPT_SECONDS = 5.0    # how long the shutdown prompt stays armed
 DOUBLE_CLICK_INTERVAL = 0.6   # max gap between the two confirming clicks
@@ -52,6 +69,44 @@ def log(msg, verbose=True):
     print(f'[main] {msg}', flush=True)
 
 
+def _as_bool(value, default=False):
+  if value is None:
+    return default
+  return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _as_int(value, default):
+  try:
+    return int(str(value).strip())
+  except (TypeError, ValueError):
+    return default
+
+
+def ensure_powerkey_ignored(verbose=True):
+  """Make systemd-logind ignore the power button (else it powers off instantly).
+
+  Idempotent: only writes + restarts logind if the drop-in isn't already in
+  place. Best-effort -- needs root and systemd; failures are logged, not fatal.
+  Re-applied on every boot because TrueNAS resets /etc on reboot.
+  """
+  try:
+    existing = ''
+    if os.path.exists(LOGIND_DROPIN):
+      with open(LOGIND_DROPIN, encoding='utf-8') as fh:
+        existing = fh.read()
+    if existing == LOGIND_DROPIN_CONTENT:
+      log('logind power-key already managed (HandlePowerKey=ignore)', verbose)
+      return
+    os.makedirs(LOGIND_DROPIN_DIR, exist_ok=True)
+    with open(LOGIND_DROPIN, 'w', encoding='utf-8') as fh:
+      fh.write(LOGIND_DROPIN_CONTENT)
+    log('set HandlePowerKey=ignore; restarting systemd-logind', verbose)
+    subprocess.run(['systemctl', 'restart', 'systemd-logind'],
+                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  except Exception as exc:  # noqa: BLE001
+    log(f'could not configure logind power key: {exc}', verbose)
+
+
 class MenuApp:
   def __init__(self, config_path, dry_run=False, verbose=True):
     self.config_path = config_path
@@ -59,9 +114,19 @@ class MenuApp:
     self.verbose = verbose
 
     self.si = pages.SysInfo()
-    self.tokens = pages.parse_config(config_path) or pages.DEFAULT_TOKENS
+    settings, tokens = pages.load_config(config_path)
+    self.settings = settings or {}
+    self.tokens = tokens or pages.DEFAULT_TOKENS
     self.pages = []
     self.index = 0
+
+    self.backlight_timeout = _as_int(
+      self.settings.get('BACKLIGHT_TIMEOUT'), DEFAULT_BACKLIGHT_TIMEOUT)
+    self.refresh_interval = _as_int(
+      self.settings.get('REFRESH_INTERVAL'), DEFAULT_REFRESH_INTERVAL)
+    self.center = _as_bool(self.settings.get('CENTER'), DEFAULT_CENTER)
+    self.manage_powerkey = _as_bool(
+      self.settings.get('MANAGE_POWERKEY'), DEFAULT_MANAGE_POWERKEY)
 
     self._overlay = False
     self._overlay_timer = None
@@ -162,7 +227,7 @@ class MenuApp:
     if not self._power_armed:
       self._power_armed = True
       self._power_last_click = 0.0  # confirm must be two *subsequent* clicks
-      self.show_overlay('Shut down NAS?', '2x power = yes', POWER_PROMPT_SECONDS)
+      self.show_overlay('Shut down NAS?', '2x Power = yes', POWER_PROMPT_SECONDS)
       if self._power_arm_timer:
         self._power_arm_timer.cancel()
       self._power_arm_timer = threading.Timer(POWER_PROMPT_SECONDS, self._disarm_power)
@@ -207,7 +272,8 @@ class MenuApp:
   # --- lifecycle ---
   def wire(self):
     q = self.qnap
-    q.display.set_backlight_timeout(BACKLIGHT_TIMEOUT)
+    q.display.set_backlight_timeout(self.backlight_timeout)
+    q.display.set_center(self.center)
     q.onInput(q.display.wake)
 
     q.btnUp.onClick(self.go_prev)       # ENTER
@@ -218,9 +284,14 @@ class MenuApp:
 
   def run(self):
     self.log('=== QNAP LCD menu starting ===')
-    self.log(f'config={self.config_path} pages={len(self.tokens)} tokens')
+    self.log(f'config={self.config_path} pages={len(self.tokens)} tokens '
+             f'backlight={self.backlight_timeout}s center={self.center} '
+             f'refresh={self.refresh_interval}s')
     if os.geteuid() != 0:
       self.log('WARNING: not root (need /dev/port and /dev/ttyS1)')
+
+    if self.manage_powerkey and os.geteuid() == 0:
+      ensure_powerkey_ignored(self.verbose)
 
     self.wire()
     status = self.qnap.start()
@@ -235,7 +306,7 @@ class MenuApp:
 
     try:
       while True:
-        time.sleep(REFRESH_INTERVAL)
+        time.sleep(self.refresh_interval)
         self.refresh()
     except KeyboardInterrupt:
       pass

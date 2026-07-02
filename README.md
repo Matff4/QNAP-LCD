@@ -53,6 +53,7 @@ Everything is read from a different bus, and none of it needs QNAP's software:
 | LCD + ENTER/SELECT | Serial `/dev/ttyS1` @ 1200 8N1 | QNAP A125 protocol — button frames `0x53 0x05 0x00 <mask>` |
 | COPY button      | Fintek F71869A Super I/O via `/dev/port` | Config-space GPIO: data-in register `0xE2`, bit 2, active-low |
 | POWER button     | ACPI `/dev/input/event*` ("Power Button") | Momentary `KEY_POWER` press events |
+| Fan RPM          | Fintek F71869A HWM via `/dev/port` | Tachometer registers `0xA0`/`0xB0`/… read through the `0xA05`/`0xA06` window; `RPM = 1500000 / count` |
 
 ### Why the Super I/O dance?
 
@@ -114,21 +115,35 @@ Press `ENTER` / `SELECT` to flip through pages. `Ctrl+C` to quit.
 
 ## Configuration
 
-`menu.conf` is a plain list of page tokens — **order is display order**, and any
-line starting with `#` is disabled:
+`menu.conf` holds **settings** (`KEY = VALUE`) and **pages** (bare tokens, in
+display order). Any line starting with `#` is disabled:
 
 ```conf
+# Settings
+BACKLIGHT_TIMEOUT = 120     # seconds before backlight off; 0 = always on
+CENTER = true               # center titles/values on the 16-char line
+REFRESH_INTERVAL = 10       # seconds between data refreshes
+
+# Pages
 OS_VERSION
 HOSTNAME
 UPTIME
 LOAD
 MEMORY
-# CPU_TEMP
-# FAN_SPEED
+CPU_TEMP
+FAN_SPEED
 NET
 STORAGE_BOOT
 STORAGE_ALL
 ```
+
+### Settings
+
+| Key                 | Default | Meaning |
+|---------------------|---------|---------|
+| `BACKLIGHT_TIMEOUT` | `120`   | Seconds of inactivity before the backlight turns off (`0` = always on) |
+| `CENTER`            | `false` | Horizontally center each line — `"     CPU Temp   "` / `"      34 C      "` |
+| `REFRESH_INTERVAL`  | `10`    | Seconds between page data refreshes |
 
 ### Available tokens
 
@@ -167,6 +182,13 @@ sudo ./main.py --diag          # Super I/O button diagnostic (init + live watch)
 
 Thanks to an exclusive lock on the serial port, a second instance will refuse to
 start rather than corrupt the panel stream — so auto-start is safe.
+
+`main.py` also configures **systemd-logind** on startup so the power button
+runs the menu's *prompt → confirm* flow instead of an instant poweroff. It
+drops `HandlePowerKey=ignore` into `/etc/systemd/logind.conf.d/` and restarts
+logind only if needed. This means you only need **one** TrueNAS Post-Init
+command (launch `main.py`) — no separate `sed`/`logind` script. Disable it with
+`MANAGE_POWERKEY = false` in `menu.conf` if you'd rather manage it yourself.
 
 **systemd unit** (`/etc/systemd/system/qnap-lcd.service`):
 
@@ -256,9 +278,13 @@ A clean panel stream looks like this in `serial-dump.py`:
 - **COPY button does nothing.** Run `sudo ./main.py --diag` and press COPY — you
   should see the config-space value change. If not, the Super I/O didn't
   initialize (check you're root and `/dev/port` is accessible).
-- **`CPU_TEMP` / `FAN_SPEED` show `N/A`.** The sensors are auto-discovered from
-  `/sys/class/hwmon`. Make sure the relevant kernel module is loaded
-  (`coretemp` for CPU, `f71882fg` for the Fintek fan/temps).
+- **`FAN_SPEED` shows `N/A`.** Fan RPM is read first from `/sys/class/hwmon`
+  and, if nothing is there, directly from the Fintek HWM tachometers over
+  `/dev/port` — so it should work with no kernel module. Verify with
+  `sudo ./sio_init.py --fans`; if every fan reads `0`, the chassis fan may be
+  wired to a tach channel this map doesn't cover (send me the `--fans` output).
+- **`CPU_TEMP` shows `N/A`.** CPU temperature comes from `/sys/class/hwmon`;
+  load the `coretemp` module (`modprobe coretemp`) if it's missing.
 
 ---
 

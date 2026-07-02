@@ -28,6 +28,8 @@ import platform
 import subprocess
 import time
 
+import sio_init
+
 
 def _run(cmd, timeout=5):
   try:
@@ -126,18 +128,30 @@ class SysInfo:
     return best
 
   def fan_rpms(self):
-    """List of chassis fan RPMs (>0), preferring the Fintek Super I/O hwmon."""
-    rpms = []
-    for hwmon in sorted(glob.glob('/sys/class/hwmon/hwmon*')):
-      for inp in sorted(glob.glob(os.path.join(hwmon, 'fan*_input'))):
+    """List of chassis fan RPMs (>0).
+
+    Tries the standard hwmon sysfs first (works if the f71882fg kernel module
+    is loaded), then falls back to reading the Fintek HWM tachometers directly
+    over /dev/port -- so fan speed works with no kernel module at all.
+    """
+    def produce():
+      rpms = []
+      for hwmon in sorted(glob.glob('/sys/class/hwmon/hwmon*')):
+        for inp in sorted(glob.glob(os.path.join(hwmon, 'fan*_input'))):
+          try:
+            with open(inp, encoding='utf-8') as fh:
+              val = int(fh.read().strip())
+            if val > 0:
+              rpms.append(val)
+          except (OSError, ValueError):
+            pass
+      if not rpms:
         try:
-          with open(inp, encoding='utf-8') as fh:
-            val = int(fh.read().strip())
-          if val > 0:
-            rpms.append(val)
-        except (OSError, ValueError):
-          pass
-    return rpms
+          rpms = sio_init.read_fans()
+        except Exception:  # noqa: BLE001
+          rpms = []
+      return rpms
+    return self._cached('fans', min(self.slow_ttl, 5.0), produce)
 
   def interfaces(self):
     """List of (ifname, ipv4) for active non-loopback interfaces."""
@@ -280,8 +294,14 @@ def _resolve(token):
   return None, None
 
 
-def parse_config(path):
-  """Read a menu config file into an ordered list of tokens."""
+def load_config(path):
+  """Parse a menu config file into (settings, tokens).
+
+  - Lines with '=' are settings:  KEY = VALUE   (KEY upper-cased)
+  - Other non-blank, non-'#' lines are page tokens, in display order.
+  Returns (None, None) if the file cannot be read.
+  """
+  settings = {}
   tokens = []
   try:
     with open(path, encoding='utf-8') as fh:
@@ -289,10 +309,14 @@ def parse_config(path):
         line = raw.strip()
         if not line or line.startswith('#'):
           continue
-        tokens.append(line.split()[0])
+        if '=' in line:
+          key, value = line.split('=', 1)
+          settings[key.strip().upper()] = value.strip()
+        else:
+          tokens.append(line.split()[0])
   except OSError:
-    return None
-  return tokens
+    return None, None
+  return settings, tokens
 
 
 DEFAULT_TOKENS = [

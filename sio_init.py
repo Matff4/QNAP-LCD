@@ -219,6 +219,9 @@ def do_init(p, diagnostic=False):
     cfg_enter(p, cfg)
     dump_gpio_banks_cfg(p, cfg)
     cfg_exit(p, cfg)
+
+    log('--- fan tachometers (HWM window) ---')
+    read_fans(verbose=True)
     break
 
   if found_cfg is None:
@@ -351,6 +354,44 @@ def init_superio(verbose=True):
     p.close()
 
 
+# Fintek HWM fan tachometers (f71882fg layout): fan N value at 0xA0 + 16*N,
+# 16-bit big-endian, read via the HWM window. RPM = 1500000 / count.
+FAN_REG_BASE = 0xA0
+FAN_REG_STRIDE = 0x10
+MAX_FANS = 4
+FAN_CLOCK = 1500000
+
+
+def read_fans(verbose=False):
+  """Read fan tachometers directly from the Fintek HWM block via /dev/port.
+
+  Returns a list of plausible RPM values. Requires the HWM logical device to be
+  active with base 0x0A00 (done by init_superio()/SIOButtonPoller.init()).
+  Reads only the runtime HWM window (0xA05/0xA06), never config space, so it
+  does not interfere with the COPY-button poller.
+  """
+  try:
+    p = Port()
+  except OSError as exc:
+    if verbose:
+      log(f'read_fans: cannot open /dev/port: {exc}')
+    return []
+  try:
+    rpms = []
+    for nr in range(MAX_FANS):
+      reg = FAN_REG_BASE + FAN_REG_STRIDE * nr
+      count = (win_read(p, reg) << 8) | win_read(p, reg + 1)
+      rpm = FAN_CLOCK // count if count else 0
+      if verbose:
+        log(f'fan{nr}: reg 0x{reg:02x} count={count} -> '
+            f'{rpm if count else 0} rpm')
+      if count and count != 0xFFFF and 100 <= rpm <= 12000:
+        rpms.append(rpm)
+    return rpms
+  finally:
+    p.close()
+
+
 class SIOButtonPoller:
   """Poll the COPY button via Fintek config-space GPIO reads.
 
@@ -467,7 +508,13 @@ def main():
                   help='after init, poll the COPY button live for SECS seconds')
   ap.add_argument('--scan', type=float, default=0, metavar='SECS',
                   help='scan ALL GPIO banks for changing bits (find power pin)')
+  ap.add_argument('--fans', action='store_true',
+                  help='read and print fan tachometers, then exit')
   args = ap.parse_args()
+  if args.fans:
+    init_superio(verbose=False)
+    read_fans(verbose=True)
+    return 0
   return run(diagnostic=args.diag, watch_seconds=args.watch,
              scan_seconds=args.scan)
 
